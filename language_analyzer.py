@@ -14,6 +14,7 @@ import requests
 from requests.exceptions import ConnectionError
 import traceback
 from pathlib import Path
+from collections import defaultdict
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,6 +47,11 @@ class LanguageAnalyzer:
         
         # 加载字幕
         self.subtitles = self._load_subtitles()
+        
+        # 初始化难度分析相关
+        self.difficult_words = set()
+        self.difficult_phrases = set()
+        self.difficult_sentences = set()
         
     def _get_stanza_model_path(self) -> Path:
         """获取Stanza模型路径"""
@@ -223,6 +229,156 @@ class LanguageAnalyzer:
                 
         return sorted(results, key=lambda x: x['similarity'], reverse=True)
 
+    def _merge_sentences(self) -> List[Dict]:
+        """
+        合并被拆分的句子
+        
+        Returns:
+            合并后的句子列表，每个句子包含文本和时间信息
+        """
+        merged_sentences = []
+        current_sentence = ""
+        current_start = None
+        current_end = None
+        
+        for sub in self.subtitles:
+            text = self._clean_text(sub.text)
+            
+            # 如果当前句子为空，开始新的句子
+            if not current_sentence:
+                current_sentence = text
+                current_start = sub.start
+                current_end = sub.end
+            else:
+                # 检查是否是同一个句子的继续
+                if not text[0].isupper() and not text.startswith('"'):
+                    current_sentence += " " + text
+                    current_end = sub.end
+                else:
+                    # 保存当前句子并开始新的句子
+                    merged_sentences.append({
+                        'text': current_sentence,
+                        'start': current_start,
+                        'end': current_end
+                    })
+                    current_sentence = text
+                    current_start = sub.start
+                    current_end = sub.end
+        
+        # 添加最后一个句子
+        if current_sentence:
+            merged_sentences.append({
+                'text': current_sentence,
+                'start': current_start,
+                'end': current_end
+            })
+            
+        return merged_sentences
+        
+    def _is_difficult_word(self, word: str) -> bool:
+        """
+        判断单词是否高于B1难度
+        
+        Args:
+            word: 要判断的单词
+            
+        Returns:
+            是否高于B1难度
+        """
+        # 这里使用一些简单的规则来判断单词难度
+        # 在实际应用中，应该使用更复杂的规则或词库
+        word = word.lower()
+        return (
+            len(word) > 8 or  # 长单词
+            not word.isalpha() or  # 包含特殊字符
+            word.endswith(('tion', 'sion', 'ment', 'ance', 'ence', 'ity', 'ness')) or  # 复杂后缀
+            word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il'))  # 复杂前缀
+        )
+        
+    def _is_difficult_phrase(self, phrase: str) -> bool:
+        """
+        判断短语是否高于B1难度
+        
+        Args:
+            phrase: 要判断的短语
+            
+        Returns:
+            是否高于B1难度
+        """
+        # 这里使用一些简单的规则来判断短语难度
+        # 在实际应用中，应该使用更复杂的规则或短语库
+        words = phrase.split()
+        return (
+            len(words) > 4 or  # 长短语
+            any(self._is_difficult_word(word) for word in words) or  # 包含难词
+            any(word in ['although', 'despite', 'however', 'nevertheless', 'therefore'] for word in words)  # 复杂连词
+        )
+        
+    def _is_difficult_sentence(self, sentence: str) -> bool:
+        """
+        判断句子是否高于B1难度
+        
+        Args:
+            sentence: 要判断的句子
+            
+        Returns:
+            是否高于B1难度
+        """
+        # 这里使用一些简单的规则来判断句子难度
+        # 在实际应用中，应该使用更复杂的规则
+        words = sentence.split()
+        difficult_words = sum(1 for word in words if self._is_difficult_word(word))
+        return (
+            len(words) > 20 or  # 长句子
+            difficult_words > 3 or  # 包含多个难词
+            self._is_difficult_phrase(sentence)  # 包含难短语
+        )
+        
+    def analyze_difficulty(self):
+        """
+        分析所有句子的难度，并将结果写入文件
+        """
+        merged_sentences = self._merge_sentences()
+        
+        for sentence in merged_sentences:
+            text = sentence['text']
+            
+            # 分析单词难度
+            words = text.split()
+            for word in words:
+                if self._is_difficult_word(word):
+                    self.difficult_words.add(word.lower())
+            
+            # 分析短语难度
+            if self._is_difficult_phrase(text):
+                self.difficult_phrases.add(text)
+            
+            # 分析句子难度
+            if self._is_difficult_sentence(text):
+                self.difficult_sentences.add(text)
+        
+        # 将结果写入文件
+        self._write_results()
+        
+    def _write_results(self):
+        """将分析结果写入文件"""
+        # 写入难词
+        with open('words.txt', 'w', encoding='utf-8') as f:
+            for word in sorted(self.difficult_words):
+                f.write(f"{word}\n")
+                
+        # 写入难短语
+        with open('phrases.txt', 'w', encoding='utf-8') as f:
+            for phrase in sorted(self.difficult_phrases):
+                f.write(f"{phrase}\n")
+                
+        # 写入难句子
+        with open('sentences.txt', 'w', encoding='utf-8') as f:
+            for sentence in sorted(self.difficult_sentences):
+                f.write(f"{sentence}\n")
+                
+        logger.info("分析结果已写入文件")
+
 def main():
     try:
         # 示例用法
@@ -232,29 +388,9 @@ def main():
         offline_mode = os.environ.get('STANZA_OFFLINE', 'false').lower() == 'true'
         analyzer = LanguageAnalyzer(srt_file, offline_mode=offline_mode)
         
-        # 分析所有字幕
-        results = analyzer.analyze_all()
+        # 分析难度
+        analyzer.analyze_difficulty()
         
-        # 输出分析结果
-        for result in results:
-            print(f"\n原文: {result['original_text']}")
-            print(f"翻译: {result['translation']}")
-            print("词性标注:")
-            for tag in result['pos_tags']:
-                print(f"  {tag['word']}: {tag['pos']} ({tag['lemma']})")
-            print("依存关系:")
-            for dep in result['dependencies']:
-                print(f"  {dep['word']} <-{dep['deprel']}- {dep['head']}")
-                
-        # 生成音频
-        analyzer.generate_audio("Hello, this is a test.", "test.mp3")
-        
-        # 查找相似短语
-        similar = analyzer.find_similar_phrases("test phrase")
-        print("\n相似短语:")
-        for item in similar:
-            print(f"{item['text']} (相似度: {item['similarity']:.2f})")
-            
     except Exception as e:
         logger.error(f"程序运行出错: {e}")
         print(f"错误: {e}")
