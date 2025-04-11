@@ -23,6 +23,12 @@ This program analyzes SRT subtitle files to identify words, phrases, and sentenc
 pip install -r requirements.txt
 ```
 
+Download model for English
+
+```bash
+python -c "import stanza; stanza.download('en')"
+```
+
 ## Usage
 
 1. Run the program:
