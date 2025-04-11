@@ -3,6 +3,7 @@ import re
 import pysrt
 import nltk
 import stanza
+from stanza.pipeline.core import DownloadMethod
 from gtts import gTTS
 from googletrans import Translator
 from Levenshtein import distance
@@ -12,13 +13,14 @@ import time
 import requests
 from requests.exceptions import ConnectionError
 import traceback
+from pathlib import Path
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class LanguageAnalyzer:
-    def __init__(self, srt_file: str, target_language: str = 'en', max_retries: int = 3):
+    def __init__(self, srt_file: str, target_language: str = 'en', max_retries: int = 3, offline_mode: bool = False):
         """
         初始化语言分析器
         
@@ -26,10 +28,12 @@ class LanguageAnalyzer:
             srt_file: SRT字幕文件路径
             target_language: 目标语言代码，默认为英语
             max_retries: 模型下载最大重试次数
+            offline_mode: 是否使用离线模式（不下载模型）
         """
         self.srt_file = srt_file
         self.target_language = target_language
         self.translator = Translator()
+        self.offline_mode = offline_mode
         
         # 下载必要的NLTK数据
         try:
@@ -43,6 +47,16 @@ class LanguageAnalyzer:
         # 加载字幕
         self.subtitles = self._load_subtitles()
         
+    def _get_stanza_model_path(self) -> Path:
+        """获取Stanza模型路径"""
+        home = Path.home()
+        return home / 'stanza_resources' / 'en'
+        
+    def _check_model_exists(self) -> bool:
+        """检查模型是否已下载"""
+        model_path = self._get_stanza_model_path()
+        return model_path.exists() and any(model_path.glob('*.pt'))
+        
     def _initialize_stanza(self, max_retries: int) -> stanza.Pipeline:
         """
         初始化Stanza，包含重试机制
@@ -53,14 +67,20 @@ class LanguageAnalyzer:
         Returns:
             Stanza Pipeline对象
         """
+        if self.offline_mode:
+            if not self._check_model_exists():
+                raise RuntimeError("离线模式下未找到Stanza模型，请先下载模型或禁用离线模式")
+            logger.info("使用离线模式初始化Stanza")
+            return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse', download_method=None)
+            
         for attempt in range(max_retries):
             try:
                 # 检查模型是否已下载
-                if not os.path.exists(os.path.expanduser('~/stanza_resources')):
+                if not self._check_model_exists():
                     logger.info("正在下载Stanza模型...")
                     stanza.download('en')
                 
-                return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse')
+                return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse', download_method=DownloadMethod.REUSE_RESOURCES)
                 
             except (ConnectionError, ConnectionResetError) as e:
                 if attempt < max_retries - 1:
@@ -207,7 +227,10 @@ def main():
     try:
         # 示例用法
         srt_file = "demo.srt"
-        analyzer = LanguageAnalyzer(srt_file)
+        
+        # 检查是否使用离线模式
+        offline_mode = os.environ.get('STANZA_OFFLINE', 'false').lower() == 'true'
+        analyzer = LanguageAnalyzer(srt_file, offline_mode=offline_mode)
         
         # 分析所有字幕
         results = analyzer.analyze_all()
@@ -238,12 +261,14 @@ def main():
         print("\n如果遇到网络问题，请尝试以下解决方案：")
         print("1. 检查网络连接")
         print("2. 使用代理或VPN")
-        print("3. 手动下载Stanza模型：")
+        print("3. 使用离线模式（如果已下载模型）：")
+        print("   export STANZA_OFFLINE=true")
+        print("4. 手动下载Stanza模型：")
         print("   - 访问 https://stanfordnlp.github.io/stanza/")
         print("   - 下载所需的模型文件")
-        print("   - 将模型文件放在 ~/stanza_resources 目录下")
+        print("   - 将模型文件放在 ~/stanza_resources/en 目录下")
         
-        traceback.print_stack()
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main() 

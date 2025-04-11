@@ -29,6 +29,8 @@ Download model for English
 python -c "import stanza; stanza.download('en')"
 ```
 
+Fortunately, huggingface site provides a vital path to download the model https://huggingface.co/stanfordnlp/stanza-en
+
 ## Usage
 
 1. Run the program:
