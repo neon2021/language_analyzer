@@ -15,6 +15,9 @@ from requests.exceptions import ConnectionError
 import traceback
 from pathlib import Path
 from collections import defaultdict
+from cefrpy import CEFRAnalyzer
+
+cefr_analyzer = CEFRAnalyzer()
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -275,9 +278,16 @@ class LanguageAnalyzer:
             
         return merged_sentences
         
+    def get_cerf_level(self, word: str) -> str:
+        lvl = cefr_analyzer.get_average_word_level_CEFR(word)
+        if lvl:
+            return str(lvl)
+        else:
+            return None
+        
     def _is_difficult_word(self, word: str) -> bool:
         """
-        判断单词是否高于B1难度
+        使用CEFR判断单词是否高于B1难度
         
         Args:
             word: 要判断的单词
@@ -285,15 +295,19 @@ class LanguageAnalyzer:
         Returns:
             是否高于B1难度
         """
-        # 这里使用一些简单的规则来判断单词难度
-        # 在实际应用中，应该使用更复杂的规则或词库
         word = word.lower()
-        return (
-            len(word) > 8 or  # 长单词
-            not word.isalpha() or  # 包含特殊字符
-            word.endswith(('tion', 'sion', 'ment', 'ance', 'ence', 'ity', 'ness')) or  # 复杂后缀
-            word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il'))  # 复杂前缀
-        )
+        try:
+            level = self.get_cerf_level(word)
+            # B1对应的CEFR等级是B1，高于B1的等级是B2, C1, C2
+            return level in ['B2', 'C1', 'C2']
+        except:
+            # 如果单词不在词库中，使用备用规则
+            return (
+                len(word) > 8 or
+                not word.isalpha() or
+                word.endswith(('tion', 'sion', 'ment', 'ance', 'ence', 'ity', 'ness')) or
+                word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il'))
+            )
         
     def _is_difficult_phrase(self, phrase: str) -> bool:
         """
@@ -362,18 +376,22 @@ class LanguageAnalyzer:
         
     def _write_results(self):
         """将分析结果写入文件"""
-        # 写入难词
-        with open('words.txt', 'w', encoding='utf-8') as f:
+        # 写入难词及其CEFR等级
+        with open('generated/words.txt', 'w', encoding='utf-8') as f:
             for word in sorted(self.difficult_words):
-                f.write(f"{word}\n")
+                try:
+                    level = self.get_cerf_level(word)
+                    f.write(f"{word} (CEFR: {level})\n")
+                except:
+                    f.write(f"{word} (Unknown level)\n")
                 
         # 写入难短语
-        with open('phrases.txt', 'w', encoding='utf-8') as f:
+        with open('generated/phrases.txt', 'w', encoding='utf-8') as f:
             for phrase in sorted(self.difficult_phrases):
                 f.write(f"{phrase}\n")
                 
         # 写入难句子
-        with open('sentences.txt', 'w', encoding='utf-8') as f:
+        with open('generated/sentences.txt', 'w', encoding='utf-8') as f:
             for sentence in sorted(self.difficult_sentences):
                 f.write(f"{sentence}\n")
                 
