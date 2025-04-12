@@ -232,6 +232,67 @@ class LanguageAnalyzer:
                 
         return sorted(results, key=lambda x: x['similarity'], reverse=True)
 
+    def _merge_sentences(self) -> List[Dict]:
+        """
+        合并被拆分的句子
+        
+        Returns:
+            合并后的句子列表，每个句子包含文本和时间信息
+        """
+        merged_sentences = []
+        current_sentence = ""
+        current_start = None
+        current_end = None
+        
+        for sub in self.subtitles:
+            text = self._clean_text(sub.text)
+            
+            # 如果当前句子为空，开始新的句子
+            if not current_sentence:
+                current_sentence = text
+                current_start = sub.start
+                current_end = sub.end
+            else:
+                # 检查是否是同一个句子的继续
+                # 放宽句子合并条件
+                if (not text[0].isupper() or 
+                    text.startswith('"') or 
+                    text.startswith("'") or
+                    text.startswith('(') or
+                    text.startswith('[') or
+                    text.startswith('{') or
+                    len(current_sentence) < 5 or  # 如果当前句子太短，继续合并
+                    text.startswith('and ') or    # 以and开头的句子继续合并
+                    text.startswith('but ') or    # 以but开头的句子继续合并
+                    text.startswith('or ') or     # 以or开头的句子继续合并
+                    text.startswith('so ') or     # 以so开头的句子继续合并
+                    text.startswith('for ') or    # 以for开头的句子继续合并
+                    text.startswith('nor ') or    # 以nor开头的句子继续合并
+                    text.startswith('yet ')):     # 以yet开头的句子继续合并
+                    current_sentence += " " + text
+                    current_end = sub.end
+                else:
+                    # 保存当前句子并开始新的句子
+                    if len(current_sentence.split()) <= 50:  # 放宽句子长度限制
+                        merged_sentences.append({
+                            'text': current_sentence,
+                            'start': current_start,
+                            'end': current_end
+                        })
+                    current_sentence = text
+                    current_start = sub.start
+                    current_end = sub.end
+        
+        # 添加最后一个句子
+        if current_sentence and len(current_sentence.split()) <= 50:
+            merged_sentences.append({
+                'text': current_sentence,
+                'start': current_start,
+                'end': current_end
+            })
+            
+        return merged_sentences
+        
     def _extract_phrases(self, text: str) -> List[str]:
         """
         从文本中提取有意义的短语
@@ -253,8 +314,8 @@ class LanguageAnalyzer:
                 current_phrase = []
                 
                 for word in sentence.words:
-                    # 如果是名词、形容词或限定词，添加到当前短语
-                    if word.pos in ['NOUN', 'PROPN', 'ADJ', 'DET']:
+                    # 如果是名词、形容词、限定词、代词或数词，添加到当前短语
+                    if word.pos in ['NOUN', 'PROPN', 'ADJ', 'DET', 'PRON', 'NUM']:
                         current_phrase.append(word.text)
                     # 如果是介词，开始新的短语
                     elif word.pos == 'ADP' and current_phrase:
@@ -274,8 +335,8 @@ class LanguageAnalyzer:
                 current_phrase = []
                 
                 for word in sentence.words:
-                    # 如果是动词、助动词或副词，添加到当前短语
-                    if word.pos in ['VERB', 'AUX', 'ADV']:
+                    # 如果是动词、助动词、副词、介词或连词，添加到当前短语
+                    if word.pos in ['VERB', 'AUX', 'ADV', 'ADP', 'CCONJ', 'SCONJ']:
                         current_phrase.append(word.text)
                     # 如果是其他词性且当前短语不为空，保存当前短语
                     elif current_phrase:
@@ -290,12 +351,12 @@ class LanguageAnalyzer:
                 phrases.extend(noun_phrases)
                 phrases.extend(verb_phrases)
             
-            # 过滤掉太短或太长的短语，以及不合理的短语
+            # 过滤掉不合理的短语
             valid_phrases = []
             for phrase in phrases:
                 words = phrase.split()
-                # 短语长度在2-5个词之间
-                if 2 <= len(words) <= 5:
+                # 短语长度在2-6个词之间
+                if 2 <= len(words) <= 6:
                     # 检查短语是否合理
                     if self._is_valid_phrase(phrase):
                         valid_phrases.append(phrase)
@@ -324,61 +385,12 @@ class LanguageAnalyzer:
         # 检查是否包含不合理的组合
         invalid_patterns = [
             r'\b\w+\s+\w+\s+\w+\s+\w+\s+\w+\b',  # 太长的短语
-            r'\b\w+\s+\w+\s+\w+\s+\w+\b',         # 较长的短语
-            r'\b\w+\s+\w+\b',                      # 太短的短语
             r'\b[a-z]\s+[a-z]\b',                  # 单个字母的组合
             r'\b\d+\s+\w+\b',                      # 数字和词的组合
             r'\b\w+\s+\d+\b'                       # 词和数字的组合
         ]
         
         return not any(re.search(pattern, phrase.lower()) for pattern in invalid_patterns)
-        
-    def _merge_sentences(self) -> List[Dict]:
-        """
-        合并被拆分的句子
-        
-        Returns:
-            合并后的句子列表，每个句子包含文本和时间信息
-        """
-        merged_sentences = []
-        current_sentence = ""
-        current_start = None
-        current_end = None
-        
-        for sub in self.subtitles:
-            text = self._clean_text(sub.text)
-            
-            # 如果当前句子为空，开始新的句子
-            if not current_sentence:
-                current_sentence = text
-                current_start = sub.start
-                current_end = sub.end
-            else:
-                # 检查是否是同一个句子的继续
-                if not text[0].isupper() and not text.startswith('"'):
-                    current_sentence += " " + text
-                    current_end = sub.end
-                else:
-                    # 保存当前句子并开始新的句子
-                    if len(current_sentence.split()) <= 30:  # 限制句子长度
-                        merged_sentences.append({
-                            'text': current_sentence,
-                            'start': current_start,
-                            'end': current_end
-                        })
-                    current_sentence = text
-                    current_start = sub.start
-                    current_end = sub.end
-        
-        # 添加最后一个句子
-        if current_sentence and len(current_sentence.split()) <= 30:
-            merged_sentences.append({
-                'text': current_sentence,
-                'start': current_start,
-                'end': current_end
-            })
-            
-        return merged_sentences
         
     def get_cerf_level(self, word: str) -> str:
         lvl = cefr_analyzer.get_average_word_level_CEFR(word)
@@ -400,15 +412,15 @@ class LanguageAnalyzer:
         word = word.lower()
         try:
             level = self.get_cerf_level(word)
-            # B1对应的CEFR等级是B1，高于B1的等级是B2, C1, C2
-            return level in ['B2', 'C1', 'C2']
+            # 放宽难度判断，包括B1及以上
+            return level in ['B1', 'B2', 'C1', 'C2']
         except:
             # 如果单词不在词库中，使用备用规则
             return (
-                len(word) > 8 or
+                len(word) > 6 or  # 放宽长度限制
                 not word.isalpha() or
-                word.endswith(('tion', 'sion', 'ment', 'ance', 'ence', 'ity', 'ness')) or
-                word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il'))
+                word.endswith(('tion', 'sion', 'ment', 'ance', 'ence', 'ity', 'ness', 'ism', 'ist', 'ize', 'ise')) or
+                word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il', 're', 'pre', 'post', 'anti', 'inter', 'intra', 'extra', 'over', 'under'))
             )
         
     def _is_difficult_phrase(self, phrase: str) -> bool:
@@ -494,30 +506,37 @@ class LanguageAnalyzer:
         """
         分析所有句子的难度，并将结果写入文件
         """
-        merged_sentences = self._merge_sentences()
-        
-        for sentence in merged_sentences:
-            text = sentence['text']
+        try:
+            merged_sentences = self._merge_sentences()
+            logger.info(f"合并后的句子数量: {len(merged_sentences)}")
             
-            # 分析单词难度
-            words = text.split()
-            for word in words:
-                if self._is_difficult_word(word):
-                    self.difficult_words.add(word.lower())
+            for sentence in merged_sentences:
+                text = sentence['text']
+                logger.debug(f"分析句子: {text}")
+                
+                # 分析单词难度
+                words = text.split()
+                for word in words:
+                    if self._is_difficult_word(word):
+                        self.difficult_words.add(word.lower())
+                
+                # 提取并分析短语难度
+                phrases = self._extract_phrases(text)
+                logger.debug(f"提取到的短语: {phrases}")
+                for phrase in phrases:
+                    if self._is_difficult_phrase(phrase):
+                        self.difficult_phrases.add(phrase)
+                
+                # 分析句子难度
+                if self._is_difficult_sentence(text):
+                    self.difficult_sentences.add(text)
             
-            # 提取并分析短语难度
-            phrases = self._extract_phrases(text)
-            for phrase in phrases:
-                if self._is_difficult_phrase(phrase):
-                    self.difficult_phrases.add(phrase)
-                # self.difficult_phrases.add(phrase)
+            # 将结果写入文件
+            self._write_results()
             
-            # 分析句子难度
-            if self._is_difficult_sentence(text):
-                self.difficult_sentences.add(text)
-        
-        # 将结果写入文件
-        self._write_results()
+        except Exception as e:
+            logger.error(f"分析难度时出错: {e}")
+            raise
         
     def _write_results(self):
         """将分析结果写入文件"""
