@@ -232,6 +232,107 @@ class LanguageAnalyzer:
                 
         return sorted(results, key=lambda x: x['similarity'], reverse=True)
 
+    def _extract_phrases(self, text: str) -> List[str]:
+        """
+        从文本中提取有意义的短语
+        
+        Args:
+            text: 要分析的文本
+            
+        Returns:
+            提取出的短语列表
+        """
+        try:
+            # 使用Stanza进行依存分析
+            doc = self.nlp(text)
+            phrases = []
+            
+            for sentence in doc.sentences:
+                # 提取名词短语
+                noun_phrases = []
+                current_phrase = []
+                
+                for word in sentence.words:
+                    # 如果是名词、形容词或限定词，添加到当前短语
+                    if word.pos in ['NOUN', 'PROPN', 'ADJ', 'DET']:
+                        current_phrase.append(word.text)
+                    # 如果是介词，开始新的短语
+                    elif word.pos == 'ADP' and current_phrase:
+                        noun_phrases.append(' '.join(current_phrase))
+                        current_phrase = []
+                    # 如果是其他词性且当前短语不为空，保存当前短语
+                    elif current_phrase:
+                        noun_phrases.append(' '.join(current_phrase))
+                        current_phrase = []
+                
+                # 添加最后一个短语
+                if current_phrase:
+                    noun_phrases.append(' '.join(current_phrase))
+                
+                # 提取动词短语
+                verb_phrases = []
+                current_phrase = []
+                
+                for word in sentence.words:
+                    # 如果是动词、助动词或副词，添加到当前短语
+                    if word.pos in ['VERB', 'AUX', 'ADV']:
+                        current_phrase.append(word.text)
+                    # 如果是其他词性且当前短语不为空，保存当前短语
+                    elif current_phrase:
+                        verb_phrases.append(' '.join(current_phrase))
+                        current_phrase = []
+                
+                # 添加最后一个短语
+                if current_phrase:
+                    verb_phrases.append(' '.join(current_phrase))
+                
+                # 合并所有短语
+                phrases.extend(noun_phrases)
+                phrases.extend(verb_phrases)
+            
+            # 过滤掉太短或太长的短语，以及不合理的短语
+            valid_phrases = []
+            for phrase in phrases:
+                words = phrase.split()
+                # 短语长度在2-5个词之间
+                if 2 <= len(words) <= 5:
+                    # 检查短语是否合理
+                    if self._is_valid_phrase(phrase):
+                        valid_phrases.append(phrase)
+            
+            return valid_phrases
+            
+        except Exception as e:
+            logger.error(f"提取短语失败: {e}")
+            return []
+            
+    def _is_valid_phrase(self, phrase: str) -> bool:
+        """
+        判断短语是否合理
+        
+        Args:
+            phrase: 要判断的短语
+            
+        Returns:
+            是否合理
+        """
+        # 检查是否包含重复词
+        words = phrase.split()
+        if len(words) != len(set(words)):
+            return False
+            
+        # 检查是否包含不合理的组合
+        invalid_patterns = [
+            r'\b\w+\s+\w+\s+\w+\s+\w+\s+\w+\b',  # 太长的短语
+            r'\b\w+\s+\w+\s+\w+\s+\w+\b',         # 较长的短语
+            r'\b\w+\s+\w+\b',                      # 太短的短语
+            r'\b[a-z]\s+[a-z]\b',                  # 单个字母的组合
+            r'\b\d+\s+\w+\b',                      # 数字和词的组合
+            r'\b\w+\s+\d+\b'                       # 词和数字的组合
+        ]
+        
+        return not any(re.search(pattern, phrase.lower()) for pattern in invalid_patterns)
+        
     def _merge_sentences(self) -> List[Dict]:
         """
         合并被拆分的句子
@@ -259,17 +360,18 @@ class LanguageAnalyzer:
                     current_end = sub.end
                 else:
                     # 保存当前句子并开始新的句子
-                    merged_sentences.append({
-                        'text': current_sentence,
-                        'start': current_start,
-                        'end': current_end
-                    })
+                    if len(current_sentence.split()) <= 30:  # 限制句子长度
+                        merged_sentences.append({
+                            'text': current_sentence,
+                            'start': current_start,
+                            'end': current_end
+                        })
                     current_sentence = text
                     current_start = sub.start
                     current_end = sub.end
         
         # 添加最后一个句子
-        if current_sentence:
+        if current_sentence and len(current_sentence.split()) <= 30:
             merged_sentences.append({
                 'text': current_sentence,
                 'start': current_start,
@@ -309,73 +411,6 @@ class LanguageAnalyzer:
                 word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il'))
             )
         
-    def _extract_phrases(self, text: str) -> List[str]:
-        """
-        从文本中提取有意义的短语
-        
-        Args:
-            text: 要分析的文本
-            
-        Returns:
-            提取出的短语列表
-        """
-        try:
-            # 使用Stanza进行依存分析
-            doc = self.nlp(text)
-            phrases = []
-            
-            for sentence in doc.sentences:
-                # 提取名词短语
-                noun_phrases = []
-                current_phrase = []
-                
-                for word in sentence.words:
-                    # 如果是名词或形容词，添加到当前短语
-                    if word.pos in ['NOUN', 'PROPN', 'ADJ']:
-                        current_phrase.append(word.text)
-                    # 如果是介词，开始新的短语
-                    elif word.pos == 'ADP' and current_phrase:
-                        noun_phrases.append(' '.join(current_phrase))
-                        current_phrase = []
-                    # 如果是其他词性且当前短语不为空，保存当前短语
-                    elif current_phrase:
-                        noun_phrases.append(' '.join(current_phrase))
-                        current_phrase = []
-                
-                # 添加最后一个短语
-                if current_phrase:
-                    noun_phrases.append(' '.join(current_phrase))
-                
-                # 提取动词短语
-                verb_phrases = []
-                current_phrase = []
-                
-                for word in sentence.words:
-                    # 如果是动词或助动词，添加到当前短语
-                    if word.pos in ['VERB', 'AUX']:
-                        current_phrase.append(word.text)
-                    # 如果是其他词性且当前短语不为空，保存当前短语
-                    elif current_phrase:
-                        verb_phrases.append(' '.join(current_phrase))
-                        current_phrase = []
-                
-                # 添加最后一个短语
-                if current_phrase:
-                    verb_phrases.append(' '.join(current_phrase))
-                
-                # 合并所有短语
-                phrases.extend(noun_phrases)
-                phrases.extend(verb_phrases)
-            
-            # 过滤掉太短或太长的短语
-            phrases = [p for p in phrases if 2 <= len(p.split()) <= 5]
-            
-            return phrases
-            
-        except Exception as e:
-            logger.error(f"提取短语失败: {e}")
-            return []
-            
     def _is_difficult_phrase(self, phrase: str) -> bool:
         """
         判断短语是否高于B1难度
@@ -409,7 +444,12 @@ class LanguageAnalyzer:
             'as a result',
             'in addition to',
             'on the other hand',
-            'in contrast to'
+            'in contrast to',
+            'in terms of',
+            'with respect to',
+            'in accordance with',
+            'in the event of',
+            'for the purpose of'
         ]
         
         return any(struct in phrase.lower() for struct in complex_structures)
@@ -424,15 +464,31 @@ class LanguageAnalyzer:
         Returns:
             是否高于B1难度
         """
-        # 这里使用一些简单的规则来判断句子难度
-        # 在实际应用中，应该使用更复杂的规则
+        # 检查句子长度
         words = sentence.split()
+        if len(words) > 20:
+            return True
+            
+        # 检查难词数量
         difficult_words = sum(1 for word in words if self._is_difficult_word(word))
-        return (
-            len(words) > 20 or  # 长句子
-            difficult_words > 3 or  # 包含多个难词
-            self._is_difficult_phrase(sentence)  # 包含难短语
-        )
+        if difficult_words > 3:
+            return True
+            
+        # 检查是否包含复杂结构
+        complex_structures = [
+            'although',
+            'despite',
+            'however',
+            'nevertheless',
+            'therefore',
+            'consequently',
+            'furthermore',
+            'moreover',
+            'nonetheless',
+            'whereas'
+        ]
+        
+        return any(struct in sentence.lower() for struct in complex_structures)
         
     def analyze_difficulty(self):
         """
@@ -489,7 +545,7 @@ class LanguageAnalyzer:
 def main():
     try:
         # 示例用法
-        srt_file = "demo.srt"
+        # srt_file = "demo.srt"
         srt_file = "JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt"
         
         # 检查是否使用离线模式
