@@ -502,7 +502,7 @@ class LanguageAnalyzer:
         
         return any(struct in sentence.lower() for struct in complex_structures)
         
-    def analyze_difficulty(self):
+    def analyze_difficulty(self, file_prefix:str=""):
         """
         分析所有句子的难度，并将结果写入文件
         """
@@ -532,16 +532,18 @@ class LanguageAnalyzer:
                     self.difficult_sentences.add(text)
             
             # 将结果写入文件
-            self._write_results()
+            self._write_results(file_prefix)
             
         except Exception as e:
             logger.error(f"分析难度时出错: {e}")
             raise
         
-    def _write_results(self):
+    def _write_results(self,file_prefix:str):
+        folder_name_with_file_prefix = f'generated/{file_prefix + "-" if file_prefix else ""}'
+        
         """将分析结果写入文件"""
         # 写入难词及其CEFR等级
-        with open('generated/words.txt', 'w', encoding='utf-8') as f:
+        with open(f'{folder_name_with_file_prefix}words.txt', 'w', encoding='utf-8') as f:
             for word in sorted(self.difficult_words):
                 try:
                     level = self.get_cerf_level(word)
@@ -550,12 +552,12 @@ class LanguageAnalyzer:
                     f.write(f"{word} (Unknown level)\n")
                 
         # 写入难短语
-        with open('generated/phrases.txt', 'w', encoding='utf-8') as f:
+        with open(f'{folder_name_with_file_prefix}phrases.txt', 'w', encoding='utf-8') as f:
             for phrase in sorted(self.difficult_phrases):
                 f.write(f"{phrase}\n")
                 
         # 写入难句子
-        with open('generated/sentences.txt', 'w', encoding='utf-8') as f:
+        with open(f'{folder_name_with_file_prefix}sentences.txt', 'w', encoding='utf-8') as f:
             for sentence in sorted(self.difficult_sentences):
                 f.write(f"{sentence}\n")
                 
@@ -565,14 +567,18 @@ def main():
     try:
         # 示例用法
         # srt_file = "demo.srt"
-        srt_file = "JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt"
+        srt_file_dict = {
+            "CNN This Morning-20250408":"CNN This Morning-20250408-Trump Threatens China-WMHY5057419108.srt",
+            "JoeRogan-2294":"JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt"
+        }
         
-        # 检查是否使用离线模式
-        offline_mode = os.environ.get('STANZA_OFFLINE', 'false').lower() == 'true'
-        analyzer = LanguageAnalyzer(srt_file, offline_mode=offline_mode)
-        
-        # 分析难度
-        analyzer.analyze_difficulty()
+        for file_prefix, srt_file in srt_file_dict.items():
+            # 检查是否使用离线模式
+            offline_mode = os.environ.get('STANZA_OFFLINE', 'false').lower() == 'true'
+            analyzer = LanguageAnalyzer(srt_file, offline_mode=offline_mode)
+            
+            # 分析难度
+            analyzer.analyze_difficulty(file_prefix)
         
     except Exception as e:
         logger.error(f"程序运行出错: {e}")
