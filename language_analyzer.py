@@ -16,8 +16,16 @@ import traceback
 from pathlib import Path
 from collections import defaultdict
 from cefrpy import CEFRAnalyzer
+from nltk.corpus import wordnet
+
+# 下载必要的NLTK数据
+try:
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('wordnet')
 
 cefr_analyzer = CEFRAnalyzer()
+translator = Translator()
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -538,18 +546,66 @@ class LanguageAnalyzer:
             logger.error(f"分析难度时出错: {e}")
             raise
         
-    def _write_results(self,file_prefix:str):
+    def get_word_info(self, word: str) -> Dict:
+        """
+        获取单词的中文释义和英文定义
+        
+        Args:
+            word: 要查询的单词
+            
+        Returns:
+            包含中文释义和英文定义的字典
+        """
+        try:
+            # 获取中文释义
+            translation = translator.translate(word, dest='zh-cn')
+            
+            # 获取WordNet中的定义
+            synsets = wordnet.synsets(word)
+            definitions = []
+            if synsets:
+                for synset in synsets[:3]:  # 取前3个定义
+                    definition = synset.definition()
+                    definitions.append(definition)
+            
+            return {
+                'translation': translation.text,
+                'definitions': definitions
+            }
+        except Exception as e:
+            logger.error(f"获取单词信息失败: {e}")
+            return {
+                'translation': '',
+                'definitions': []
+            }
+            
+    def _write_results(self, file_prefix: str):
+        """将分析结果写入文件"""
         folder_name_with_file_prefix = f'generated/{file_prefix + "-" if file_prefix else ""}'
         
-        """将分析结果写入文件"""
-        # 写入难词及其CEFR等级
+        # 写入难词及其CEFR等级、中文释义和英文定义
         with open(f'{folder_name_with_file_prefix}words.txt', 'w', encoding='utf-8') as f:
             for word in sorted(self.difficult_words):
                 try:
                     level = self.get_cerf_level(word)
+                    word_info = self.get_word_info(word)
+                    
+                    # 写入单词和CEFR等级
                     f.write(f"{word} (CEFR: {level})\n")
+                    
+                    # 写入中文释义
+                    if word_info['translation']:
+                        f.write(f"  中文释义: {word_info['translation']}\n")
+                    
+                    # 写入英文定义
+                    if word_info['definitions']:
+                        f.write("  英文定义:\n")
+                        for i, definition in enumerate(word_info['definitions'], 1):
+                            f.write(f"    {i}. {definition}\n")
+                    
+                    f.write("\n")
                 except:
-                    f.write(f"{word} (Unknown level)\n")
+                    f.write(f"{word} (Unknown level)\n\n")
                 
         # 写入难短语
         with open(f'{folder_name_with_file_prefix}phrases.txt', 'w', encoding='utf-8') as f:
