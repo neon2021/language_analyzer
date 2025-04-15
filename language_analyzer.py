@@ -1,35 +1,40 @@
-import os
-import re
-import pysrt
-import nltk
-import stanza
-from stanza.pipeline.core import DownloadMethod
-from gtts import gTTS
-from googletrans import Translator
-from Levenshtein import distance
-from typing import List, Dict, Tuple, Optional
 import logging
+import pysrt
+import stanza
+import re
+import os
 import time
 import requests
-from requests.exceptions import ConnectionError
-import traceback
+import nltk
+import phonetics
+from typing import List, Dict, Tuple, Optional, Any
+from nltk.corpus import wordnet
+from googletrans import Translator
+from stanza.pipeline.core import DownloadMethod
+from gtts import gTTS
+from Levenshtein import distance
 from pathlib import Path
 from collections import defaultdict
+import json
+import asyncio
+import traceback
 from cefrpy import CEFRAnalyzer
-from nltk.corpus import wordnet
+import eng_to_ipa as ipa
 
-# 下载必要的NLTK数据
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    nltk.download('wordnet')
+# Configure logging
+logging.basicConfig(level=logging.INFO)  # 降低日志级别
+logger = logging.getLogger(__name__)
 
-cefr_analyzer = CEFRAnalyzer()
+# Initialize translator and other components
 translator = Translator()
 
-# 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Download required NLTK data
+try:
+    nltk.data.find('corpora/wordnet')
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('wordnet')
+    nltk.download('punkt')
 
 class LanguageAnalyzer:
     def __init__(self, srt_file: str, target_language: str = 'en', max_retries: int = 3, offline_mode: bool = False):
@@ -47,19 +52,23 @@ class LanguageAnalyzer:
         self.translator = Translator()
         self.offline_mode = offline_mode
         
-        # 下载必要的NLTK数据
-        try:
-            nltk.data.find('tokenizers/punkt')
-        except LookupError:
-            nltk.download('punkt')
+        # 创建generated目录
+        self.output_dir = Path("generated")
+        self.output_dir.mkdir(exist_ok=True)
         
         # 初始化Stanza，添加重试机制
         self.nlp = self._initialize_stanza(max_retries)
+        
+        # 初始化CEFR分类器
+        self.cefr = CEFRAnalyzer()
         
         # 加载字幕
         self.subtitles = self._load_subtitles()
         
         # 初始化难度分析相关
+        self.words = set()  # 存储所有单词
+        self.phrases = set()  # 存储所有短语
+        self.merged_sentences = []  # 存储合并后的句子
         self.difficult_words = set()
         self.difficult_phrases = set()
         self.difficult_sentences = set()
@@ -67,12 +76,34 @@ class LanguageAnalyzer:
     def _get_stanza_model_path(self) -> Path:
         """获取Stanza模型路径"""
         home = Path.home()
-        return home / 'stanza_resources' / 'en'
+        model_path = home / 'stanza_resources'
+        if not model_path.exists():
+            model_path = Path('/usr/local/share/stanza_resources')
+        if not model_path.exists():
+            model_path = Path('/usr/share/stanza_resources')
+        return model_path / 'en'
         
     def _check_model_exists(self) -> bool:
         """检查模型是否已下载"""
         model_path = self._get_stanza_model_path()
-        return model_path.exists() and any(model_path.glob('*.pt'))
+        if not model_path.exists():
+            return False
+            
+        # 检查必要的模型文件
+        required_files = [
+            'default.zip',
+            'tokenize/combined.pt',
+            'pos/combined_charlm.pt',
+            'lemma/combined_nocharlm.pt',
+            'depparse/combined_charlm.pt'
+        ]
+        
+        for file in required_files:
+            if not (model_path / file).exists():
+                logging.debug(f"缺少模型文件: {file}")
+                return False
+                
+        return True
         
     def _initialize_stanza(self, max_retries: int) -> stanza.Pipeline:
         """
@@ -87,28 +118,28 @@ class LanguageAnalyzer:
         if self.offline_mode:
             if not self._check_model_exists():
                 raise RuntimeError("离线模式下未找到Stanza模型，请先下载模型或禁用离线模式")
-            logger.info("使用离线模式初始化Stanza")
+            logging.info("使用离线模式初始化Stanza")
             return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse', download_method=None)
             
         for attempt in range(max_retries):
             try:
                 # 检查模型是否已下载
                 if not self._check_model_exists():
-                    logger.info("正在下载Stanza模型...")
-                    stanza.download('en')
+                    logging.info("正在下载Stanza模型...")
+                    stanza.download('en', model_dir=str(self._get_stanza_model_path().parent))
                 
                 return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse', download_method=DownloadMethod.REUSE_RESOURCES)
                 
             except (ConnectionError, ConnectionResetError) as e:
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 5  # 递增等待时间
-                    logger.warning(f"下载模型失败，{wait_time}秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                    logging.warning(f"下载模型失败，{wait_time}秒后重试... (尝试 {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
                 else:
-                    logger.error("无法下载Stanza模型，请检查网络连接或手动下载模型")
+                    logging.error("无法下载Stanza模型，请检查网络连接或手动下载模型")
                     raise
             except Exception as e:
-                logger.error(f"初始化Stanza时发生错误: {e}")
+                logging.error(f"初始化Stanza时发生错误: {e}")
                 raise
                 
     def _load_subtitles(self) -> List[pysrt.SubRipItem]:
@@ -400,224 +431,195 @@ class LanguageAnalyzer:
         
         return not any(re.search(pattern, phrase.lower()) for pattern in invalid_patterns)
         
-    def get_cerf_level(self, word: str) -> str:
-        lvl = cefr_analyzer.get_average_word_level_CEFR(word)
-        if lvl:
-            return str(lvl)
-        else:
-            return None
-        
-    def _is_difficult_word(self, word: str) -> bool:
-        """
-        使用CEFR判断单词是否高于B1难度
-        
-        Args:
-            word: 要判断的单词
-            
-        Returns:
-            是否高于B1难度
-        """
-        word = word.lower()
+    def _get_word_level(self, word: str) -> str:
+        """使用cefrpy库确定单词的CEFR等级"""
         try:
-            level = self.get_cerf_level(word)
-            # 放宽难度判断，包括B1及以上
-            return level in ['B1', 'B2', 'C1', 'C2']
-        except:
-            # 如果单词不在词库中，使用备用规则
-            return (
-                len(word) > 6 or  # 放宽长度限制
-                not word.isalpha() or
-                word.endswith(('tion', 'sion', 'ment', 'ance', 'ence', 'ity', 'ness', 'ism', 'ist', 'ize', 'ise')) or
-                word.startswith(('un', 'dis', 'in', 'im', 'ir', 'il', 're', 'pre', 'post', 'anti', 'inter', 'intra', 'extra', 'over', 'under'))
-            )
-        
-    def _is_difficult_phrase(self, phrase: str) -> bool:
-        """
-        判断短语是否高于B1难度
-        
-        Args:
-            phrase: 要判断的短语
-            
-        Returns:
-            是否高于B1难度
-        """
-        # 检查短语中的单词难度
-        words = phrase.split()
-        difficult_words = sum(1 for word in words if self._is_difficult_word(word))
-        
-        # 如果短语包含多个难词，认为是难短语
-        if difficult_words >= 2:
-            return True
-            
-        # 检查短语长度
-        if len(words) > 4:
-            return True
-            
-        # 检查是否包含复杂结构
-        complex_structures = [
-            'as well as',
-            'in order to',
-            'so that',
-            'such as',
-            'due to',
-            'in spite of',
-            'as a result',
-            'in addition to',
-            'on the other hand',
-            'in contrast to',
-            'in terms of',
-            'with respect to',
-            'in accordance with',
-            'in the event of',
-            'for the purpose of'
-        ]
-        
-        return any(struct in phrase.lower() for struct in complex_structures)
-        
-    def _is_difficult_sentence(self, sentence: str) -> bool:
-        """
-        判断句子是否高于B1难度
-        
-        Args:
-            sentence: 要判断的句子
-            
-        Returns:
-            是否高于B1难度
-        """
-        # 检查句子长度
-        words = sentence.split()
-        if len(words) > 20:
-            return True
-            
-        # 检查难词数量
-        difficult_words = sum(1 for word in words if self._is_difficult_word(word))
-        if difficult_words > 3:
-            return True
-            
-        # 检查是否包含复杂结构
-        complex_structures = [
-            'although',
-            'despite',
-            'however',
-            'nevertheless',
-            'therefore',
-            'consequently',
-            'furthermore',
-            'moreover',
-            'nonetheless',
-            'whereas'
-        ]
-        
-        return any(struct in sentence.lower() for struct in complex_structures)
-        
-    def analyze_difficulty(self, file_prefix:str=""):
-        """
-        分析所有句子的难度，并将结果写入文件
-        """
-        try:
-            merged_sentences = self._merge_sentences()
-            logger.info(f"合并后的句子数量: {len(merged_sentences)}")
-            
-            for sentence in merged_sentences:
-                text = sentence['text']
-                logger.debug(f"分析句子: {text}")
+            # 清理单词
+            word = word.lower().strip('.,!?;:\'\"')
+            if not word or len(word) <= 1:
+                return 'A1-A2'
                 
-                # 分析单词难度
-                words = text.split()
-                for word in words:
-                    if self._is_difficult_word(word):
-                        self.difficult_words.add(word.lower())
+            # 使用CEFR分类器获取等级
+            level = self.cefr.get_average_word_level_float(word)
+            if not level:
+                return 'A1-A2'
                 
-                # 提取并分析短语难度
-                phrases = self._extract_phrases(text)
-                logger.debug(f"提取到的短语: {phrases}")
-                for phrase in phrases:
-                    if self._is_difficult_phrase(phrase):
-                        self.difficult_phrases.add(phrase)
-                
-                # 分析句子难度
-                if self._is_difficult_sentence(text):
-                    self.difficult_sentences.add(text)
-            
-            # 将结果写入文件
-            self._write_results(file_prefix)
-            
-        except Exception as e:
-            logger.error(f"分析难度时出错: {e}")
-            raise
-        
-    def get_word_info(self, word: str) -> Dict:
-        """
-        获取单词的中文释义和英文定义
-        
-        Args:
-            word: 要查询的单词
-            
-        Returns:
-            包含中文释义和英文定义的字典
-        """
-        try:
-            # 获取中文释义
-            translation = translator.translate(word, dest='zh-cn')
-            
-            # 获取WordNet中的定义
-            synsets = wordnet.synsets(word)
-            definitions = []
-            if synsets:
-                for synset in synsets[:3]:  # 取前3个定义
-                    definition = synset.definition()
-                    definitions.append(definition)
-            
-            return {
-                'translation': translation.text,
-                'definitions': definitions
+            # 将数字等级转换为字母等级
+            level_map = {
+                1: 'A1',
+                2: 'A2',
+                3: 'B1',
+                4: 'B2',
+                5: 'C1',
+                6: 'C2'
             }
+            return level_map.get(level, 'A1-A2')
+            
         except Exception as e:
-            logger.error(f"获取单词信息失败: {e}")
-            return {
-                'translation': '',
+            logging.error(f"获取单词 {word} 的CEFR等级时出错: {str(e)}")
+            return 'A1-A2'
+
+    def _is_difficult_word(self, word: str) -> bool:
+        """判断一个单词是否为难词（B1及以上级别）"""
+        try:
+            # 获取单词的CEFR等级
+            level = self._get_word_level(word)
+            
+            # 如果等级是B1或以上，认为是难词
+            if level in ['B1', 'B2', 'C1', 'C2']:
+                logging.debug(f"单词 {word} 的难度级别为 {level}")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logging.error(f"判断单词 {word} 难度时出错: {str(e)}")
+            return False
+
+    async def get_word_info(self, word: str) -> dict:
+        """
+        获取单词的详细信息，包括音标、中文释义和英文定义
+        """
+        try:
+            # 初始化结果字典
+            result = {
+                'phonetic': '',
+                'chinese': '',
                 'definitions': []
             }
             
-    def _write_results(self, file_prefix: str):
-        """将分析结果写入文件"""
-        folder_name_with_file_prefix = f'generated/{file_prefix + "-" if file_prefix else ""}'
-        
-        # 写入难词及其CEFR等级、中文释义和英文定义
-        with open(f'{folder_name_with_file_prefix}words.txt', 'w', encoding='utf-8') as f:
-            for word in sorted(self.difficult_words):
-                try:
-                    level = self.get_cerf_level(word)
-                    word_info = self.get_word_info(word)
+            # 获取音标
+            try:
+                # 使用eng-to-ipa获取音标
+                phonetic = ipa.convert(word)
+                if phonetic:
+                    result['phonetic'] = phonetic
+            except Exception as e:
+                logging.warning(f"获取单词 {word} 音标时出错: {str(e)}")
+            
+            # 获取英文定义和中文释义
+            try:
+                # 使用wordnet获取定义
+                synsets = wordnet.synsets(word)
+                if synsets:
+                    # 获取英文定义
+                    for synset in synsets[:3]:  # 最多取3个定义
+                        result['definitions'].append(synset.definition())
                     
-                    # 写入单词和CEFR等级
-                    f.write(f"{word} (CEFR: {level})\n")
-                    
-                    # 写入中文释义
-                    if word_info['translation']:
-                        f.write(f"  中文释义: {word_info['translation']}\n")
-                    
-                    # 写入英文定义
+                    # 获取中文释义（使用wordnet的lemma名称作为简单翻译）
+                    lemmas = synsets[0].lemmas()
+                    if lemmas:
+                        result['chinese'] = lemmas[0].name()
+            except Exception as e:
+                logging.warning(f"获取单词 {word} 释义时出错: {str(e)}")
+            
+            return result
+        except Exception as e:
+            logging.error(f"获取单词 {word} 信息时出错: {str(e)}")
+            return {'phonetic': '', 'chinese': '', 'definitions': []}
+
+    def _write_results(self, file_prefix: str, difficult_words: set, difficult_phrases: list, difficult_sentences: list):
+        """
+        将分析结果写入文件
+        """
+        try:
+            # 写入难词信息
+            output_path = self.output_dir / f"{file_prefix}_words.txt"
+            with open(output_path, "w", encoding="utf-8") as f:
+                for word in sorted(difficult_words):
+                    word_info = asyncio.run(self.get_word_info(word[0]))
+                    level = self._get_word_level(word[0])
+                    f.write(f"{word[0]} (CEFR: {level})\n")
+                    if word_info['phonetic']:
+                        f.write(f"  音标: /{word_info['phonetic']}/\n")
+                    if word_info['chinese']:
+                        f.write(f"  中文释义: {word_info['chinese']}\n")
                     if word_info['definitions']:
                         f.write("  英文定义:\n")
                         for i, definition in enumerate(word_info['definitions'], 1):
                             f.write(f"    {i}. {definition}\n")
-                    
                     f.write("\n")
-                except:
-                    f.write(f"{word} (Unknown level)\n\n")
+            
+            # 写入难词组信息
+            output_path = self.output_dir / f"{file_prefix}_phrases.txt"
+            with open(output_path, "w", encoding="utf-8") as f:
+                for phrase in difficult_phrases:
+                    f.write(f"{phrase}\n")
+            
+            # 写入难句信息
+            output_path = self.output_dir / f"{file_prefix}_sentences.txt"
+            with open(output_path, "w", encoding="utf-8") as f:
+                for sentence in difficult_sentences:
+                    f.write(f"{sentence}\n")
+            
+            logging.info(f"分析结果已写入文件：\n"
+                        f"{self.output_dir}/{file_prefix}_words.txt\n"
+                        f"{self.output_dir}/{file_prefix}_phrases.txt\n"
+                        f"{self.output_dir}/{file_prefix}_sentences.txt")
+        except Exception as e:
+            logging.error(f"写入结果时出错: {str(e)}")
+            traceback.print_exc()
+
+    def _is_difficult_phrase(self, phrase):
+        """判断短语是否困难"""
+        words = phrase.lower().split()
+        difficult_word_count = sum(1 for word in words if self._is_difficult_word(word))
+        return difficult_word_count >= len(words) / 2
+
+    def analyze_difficulty(self, file_prefix):
+        """分析文本难度并写入结果"""
+        try:
+            # 获取所有单词和短语
+            self.merged_sentences = self._merge_sentences()
+            logging.info(f"合并后的句子数量: {len(self.merged_sentences)}")
+            
+            # 处理每个句子
+            for sentence in self.merged_sentences:
+                text = sentence['text']
+                # 提取单词
+                words = text.lower().split()
+                self.words.update(words)
                 
-        # 写入难短语
-        with open(f'{folder_name_with_file_prefix}phrases.txt', 'w', encoding='utf-8') as f:
-            for phrase in sorted(self.difficult_phrases):
-                f.write(f"{phrase}\n")
-                
-        # 写入难句子
-        with open(f'{folder_name_with_file_prefix}sentences.txt', 'w', encoding='utf-8') as f:
-            for sentence in sorted(self.difficult_sentences):
-                f.write(f"{sentence}\n")
-                
-        logger.info("分析结果已写入文件")
+                # 提取短语
+                phrases = self._extract_phrases(text)
+                self.phrases.update(phrases)
+            
+            logging.info(f"提取到的单词数量: {len(self.words)}")
+            logging.info(f"提取到的短语数量: {len(self.phrases)}")
+
+            # 分析单词难度
+            difficult_words = []
+            for word in self.words:
+                if self._is_difficult_word(word):
+                    word_info = asyncio.run(self.get_word_info(word))
+                    difficult_words.append((word, word_info))
+                    logging.debug(f"找到难词: {word}")
+
+            logging.info(f"找到的难词数量: {len(difficult_words)}")
+
+            # 分析短语难度
+            difficult_phrases = [phrase for phrase in self.phrases if self._is_difficult_phrase(phrase)]
+            logging.info(f"找到的难词组数量: {len(difficult_phrases)}")
+
+            # 分析句子难度
+            difficult_sentences = []
+            for sentence in self.merged_sentences:
+                text = sentence['text']
+                words = text.split()
+                difficult_word_count = sum(1 for word in words if self._is_difficult_word(word))
+                if difficult_word_count >= len(words) / 3:  # 如果超过1/3的单词是困难的
+                    difficult_sentences.append(text)
+                    logging.debug(f"找到难句: {text}")
+
+            logging.info(f"找到的难句数量: {len(difficult_sentences)}")
+
+            # 写入结果
+            self._write_results(file_prefix, difficult_words, difficult_phrases, difficult_sentences)
+            logging.info(f"分析完成，结果已写入文件")
+
+        except Exception as e:
+            logging.error(f"分析难度时出错: {str(e)}")
+            raise
 
 def main():
     try:
@@ -625,7 +627,8 @@ def main():
         # srt_file = "demo.srt"
         srt_file_dict = {
             "CNN This Morning-20250408":"CNN This Morning-20250408-Trump Threatens China-WMHY5057419108.srt",
-            "JoeRogan-2294":"JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt"
+            "JoeRogan-2294":"JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt",
+            "demo":"demo.srt",
         }
         
         for file_prefix, srt_file in srt_file_dict.items():
