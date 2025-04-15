@@ -25,6 +25,8 @@ from reportlab.lib.pagesizes import A5
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from ebooklib import epub
 
 # Configure logging
@@ -41,6 +43,27 @@ try:
 except LookupError:
     nltk.download('wordnet')
     nltk.download('punkt')
+
+# 注册字体
+try:
+    # 尝试加载思源黑体
+    font_path = "/System/Library/Fonts/SourceHanSansTC-Regular.otf"  # macOS路径
+    if not os.path.exists(font_path):
+        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"  # Linux路径
+    if not os.path.exists(font_path):
+        font_path = "C:/Windows/Fonts/SourceHanSansTC-Regular.otf"  # Windows路径
+    
+    if os.path.exists(font_path):
+        pdfmetrics.registerFont(TTFont('SourceHanSans', font_path))
+    else:
+        # 如果找不到思源黑体，尝试使用Arial Unicode MS（通用字体）
+        fallback_font = "/Library/Fonts/Arial Unicode.ttf"
+        if os.path.exists(fallback_font):
+            pdfmetrics.registerFont(TTFont('ArialUnicode', fallback_font))
+        else:
+            logging.warning("未找到合适的Unicode字体，PDF中的中文和音标可能无法正常显示")
+except Exception as e:
+    logging.error(f"注册字体时出错: {str(e)}")
 
 class LanguageAnalyzer:
     def __init__(self, srt_file: str, target_language: str = 'en', max_retries: int = 3, offline_mode: bool = False):
@@ -549,17 +572,37 @@ class LanguageAnalyzer:
             
             # 创建样式
             styles = getSampleStyleSheet()
+            
+            # 设置字体
+            font_name = 'SourceHanSans' if 'SourceHanSans' in pdfmetrics.getRegisteredFontNames() else 'ArialUnicode'
+            
             title_style = ParagraphStyle(
                 'CustomTitle',
                 parent=styles['Heading1'],
+                fontName=font_name,
                 fontSize=14,
-                spaceAfter=20
+                spaceAfter=20,
+                leading=20
             )
+            
             normal_style = ParagraphStyle(
                 'CustomNormal',
                 parent=styles['Normal'],
+                fontName=font_name,
                 fontSize=12,
-                leading=16
+                leading=16,
+                spaceAfter=8,
+                wordWrap='CJK'  # 启用中文换行
+            )
+
+            separator_style = ParagraphStyle(
+                'Separator',
+                parent=styles['Normal'],
+                fontName=font_name,
+                fontSize=12,
+                leading=16,
+                alignment=1,  # 居中对齐
+                textColor=colors.HexColor('#000080')  # 深蓝色
             )
             
             # 读取TXT内容
@@ -577,9 +620,21 @@ class LanguageAnalyzer:
             # 添加正文内容
             for line in content.split('\n'):
                 if line.strip():
-                    p = Paragraph(line, normal_style)
-                    elements.append(p)
-                    elements.append(Spacer(1, 6))
+                    if line.startswith('-' * 50):
+                        # 使用双线深蓝色分隔线
+                        elements.append(Spacer(1, 20))  # 增加分隔线前的空间
+                        # 第一条线
+                        elements.append(Paragraph('<hr width="100%" color="#000080" height="1" />', separator_style))
+                        elements.append(Spacer(1, 3))  # 两条线之间的间距
+                        # 第二条线
+                        elements.append(Paragraph('<hr width="100%" color="#000080" height="1" />', separator_style))
+                        elements.append(Spacer(1, 20))  # 增加分隔线后的空间
+                    else:
+                        # 处理缩进
+                        if line.startswith('  '):  # 对于缩进的行
+                            line = '&nbsp;' * 4 + line.lstrip()  # 使用HTML空格进行缩进
+                        p = Paragraph(line, normal_style)
+                        elements.append(p)
             
             # 生成PDF
             doc.build(elements)
@@ -590,7 +645,7 @@ class LanguageAnalyzer:
         except Exception as e:
             logging.error(f"转换PDF时出错: {str(e)}")
             return None
-            
+
     def _convert_to_epub(self, txt_file: Path) -> Path:
         """
         将TXT文件转换为EPUB格式
@@ -621,11 +676,61 @@ class LanguageAnalyzer:
                               file_name='content.xhtml',
                               lang='en')
             
+            # 添加CSS样式
+            style = '''
+                .separator {
+                    border-top: 1px solid #999;
+                    margin: 2em 0;
+                    width: 100%;
+                }
+                .word-entry {
+                    margin-bottom: 1.5em;
+                }
+                .phonetic {
+                    margin-left: 1em;
+                    color: #666;
+                }
+                .definition {
+                    margin-left: 1em;
+                }
+            '''
+            
             # 将内容转换为HTML格式
             html_content = ['<h1>{}</h1>'.format(txt_file.stem)]
+            html_content.append('<style>{}</style>'.format(style))
+            
+            # 处理每一行
+            current_word_content = []
             for line in content.split('\n'):
                 if line.strip():
-                    html_content.append('<p>{}</p>'.format(line))
+                    if line.startswith('-' * 50):
+                        # 如果有累积的单词内容，添加到HTML中
+                        if current_word_content:
+                            html_content.append('<div class="word-entry">{}</div>'.format(
+                                '\n'.join(current_word_content)
+                            ))
+                            html_content.append('<div class="separator"></div>')
+                            current_word_content = []
+                    else:
+                        if line.startswith('  '):  # 缩进的行
+                            if 'phonetic' in line.lower():
+                                line = '<div class="phonetic">{}</div>'.format(line.strip())
+                            else:
+                                line = '<div class="definition">{}</div>'.format(line.strip())
+                        else:
+                            if current_word_content:  # 如果遇到新单词，先处理之前的内容
+                                html_content.append('<div class="word-entry">{}</div>'.format(
+                                    '\n'.join(current_word_content)
+                                ))
+                                html_content.append('<div class="separator"></div>')
+                                current_word_content = []
+                        current_word_content.append(line)
+            
+            # 添加最后一个单词的内容
+            if current_word_content:
+                html_content.append('<div class="word-entry">{}</div>'.format(
+                    '\n'.join(current_word_content)
+                ))
             
             c1.content = '\n'.join(html_content)
             
@@ -660,19 +765,24 @@ class LanguageAnalyzer:
             # 写入难词信息
             output_path = self.output_dir / f"{file_prefix}_words.txt"
             with open(output_path, "w", encoding="utf-8") as f:
-                for word in sorted(difficult_words):
+                for i, word in enumerate(sorted(difficult_words)):
                     word_info = asyncio.run(self.get_word_info(word[0]))
                     level = self._get_word_level(word[0])
+                    
+                    # 写入单词信息
                     f.write(f"{word[0]} (CEFR: {level})\n")
                     if word_info['phonetic']:
                         f.write(f"  音标: /{word_info['phonetic']}/\n")
-                    if word_info['chinese']:
-                        f.write(f"  中文释义: {word_info['chinese']}\n")
                     if word_info['definitions']:
                         f.write("  英文定义:\n")
                         for i, definition in enumerate(word_info['definitions'], 1):
                             f.write(f"    {i}. {definition}\n")
-                    f.write("\n")
+                    
+                    # 如果不是最后一个单词，添加分隔线
+                    if i < len(difficult_words) - 1:
+                        f.write("\n" + "-" * 50 + "\n\n")
+                    else:
+                        f.write("\n")  # 最后一个单词后只添加空行
             
             # 写入难词组信息
             output_path = self.output_dir / f"{file_prefix}_phrases.txt"

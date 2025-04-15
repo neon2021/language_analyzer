@@ -2,3 +2,4 @@ test.mp3
 generated
 generated/*
 .idea/
+__pycache__
