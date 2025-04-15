@@ -20,6 +20,12 @@ import asyncio
 import traceback
 from cefrpy import CEFRAnalyzer
 import eng_to_ipa as ipa
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A5
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from ebooklib import epub
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)  # 降低日志级别
@@ -518,6 +524,134 @@ class LanguageAnalyzer:
             logging.error(f"获取单词 {word} 信息时出错: {str(e)}")
             return {'phonetic': '', 'chinese': '', 'definitions': []}
 
+    def _convert_to_pdf(self, txt_file: Path) -> Path:
+        """
+        将TXT文件转换为适合手机查看的PDF格式
+        
+        Args:
+            txt_file: TXT文件路径
+            
+        Returns:
+            PDF文件路径
+        """
+        try:
+            pdf_file = txt_file.with_suffix('.pdf')
+            
+            # 创建PDF文档
+            doc = SimpleDocTemplate(
+                str(pdf_file),
+                pagesize=A5,  # 使用A5尺寸，更适合手机
+                rightMargin=30,
+                leftMargin=30,
+                topMargin=30,
+                bottomMargin=30
+            )
+            
+            # 创建样式
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=14,
+                spaceAfter=20
+            )
+            normal_style = ParagraphStyle(
+                'CustomNormal',
+                parent=styles['Normal'],
+                fontSize=12,
+                leading=16
+            )
+            
+            # 读取TXT内容
+            with open(txt_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 转换内容为PDF元素
+            elements = []
+            
+            # 添加标题
+            title = txt_file.stem
+            elements.append(Paragraph(title, title_style))
+            elements.append(Spacer(1, 12))
+            
+            # 添加正文内容
+            for line in content.split('\n'):
+                if line.strip():
+                    p = Paragraph(line, normal_style)
+                    elements.append(p)
+                    elements.append(Spacer(1, 6))
+            
+            # 生成PDF
+            doc.build(elements)
+            
+            logging.info(f"已生成PDF文件：{pdf_file}")
+            return pdf_file
+            
+        except Exception as e:
+            logging.error(f"转换PDF时出错: {str(e)}")
+            return None
+            
+    def _convert_to_epub(self, txt_file: Path) -> Path:
+        """
+        将TXT文件转换为EPUB格式
+        
+        Args:
+            txt_file: TXT文件路径
+            
+        Returns:
+            EPUB文件路径
+        """
+        try:
+            epub_file = txt_file.with_suffix('.epub')
+            
+            # 创建EPUB书籍
+            book = epub.EpubBook()
+            
+            # 设置元数据
+            book.set_identifier(str(txt_file.stem))
+            book.set_title(txt_file.stem)
+            book.set_language('en')
+            
+            # 读取TXT内容
+            with open(txt_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 创建章节
+            c1 = epub.EpubHtml(title=txt_file.stem,
+                              file_name='content.xhtml',
+                              lang='en')
+            
+            # 将内容转换为HTML格式
+            html_content = ['<h1>{}</h1>'.format(txt_file.stem)]
+            for line in content.split('\n'):
+                if line.strip():
+                    html_content.append('<p>{}</p>'.format(line))
+            
+            c1.content = '\n'.join(html_content)
+            
+            # 添加章节
+            book.add_item(c1)
+            
+            # 创建目录
+            book.toc = [(epub.Section('Main'), [c1])]
+            
+            # 添加默认NCX和Nav文件
+            book.add_item(epub.EpubNcx())
+            book.add_item(epub.EpubNav())
+            
+            # 定义阅读顺序
+            book.spine = ['nav', c1]
+            
+            # 生成EPUB
+            epub.write_epub(str(epub_file), book, {})
+            
+            logging.info(f"已生成EPUB文件：{epub_file}")
+            return epub_file
+            
+        except Exception as e:
+            logging.error(f"转换EPUB时出错: {str(e)}")
+            return None
+
     def _write_results(self, file_prefix: str, difficult_words: set, difficult_phrases: list, difficult_sentences: list):
         """
         将分析结果写入文件
@@ -552,10 +686,22 @@ class LanguageAnalyzer:
                 for sentence in difficult_sentences:
                     f.write(f"{sentence}\n")
             
-            logging.info(f"分析结果已写入文件：\n"
-                        f"{self.output_dir}/{file_prefix}_words.txt\n"
-                        f"{self.output_dir}/{file_prefix}_phrases.txt\n"
-                        f"{self.output_dir}/{file_prefix}_sentences.txt")
+            # 转换为PDF和EPUB格式
+            txt_files = [
+                self.output_dir / f"{file_prefix}_words.txt",
+                self.output_dir / f"{file_prefix}_phrases.txt",
+                self.output_dir / f"{file_prefix}_sentences.txt"
+            ]
+            
+            for txt_file in txt_files:
+                if txt_file.exists():
+                    self._convert_to_pdf(txt_file)
+                    self._convert_to_epub(txt_file)
+            
+            logging.info(f"分析结果已写入文件并转换为PDF和EPUB格式：\n"
+                        f"{self.output_dir}/{file_prefix}_words.txt/.pdf/.epub\n"
+                        f"{self.output_dir}/{file_prefix}_phrases.txt/.pdf/.epub\n"
+                        f"{self.output_dir}/{file_prefix}_sentences.txt/.pdf/.epub")
         except Exception as e:
             logging.error(f"写入结果时出错: {str(e)}")
             traceback.print_exc()
@@ -626,8 +772,8 @@ def main():
         # 示例用法
         # srt_file = "demo.srt"
         srt_file_dict = {
-            "CNN This Morning-20250408":"CNN This Morning-20250408-Trump Threatens China-WMHY5057419108.srt",
-            "JoeRogan-2294":"JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt",
+            # "CNN This Morning-20250408":"CNN This Morning-20250408-Trump Threatens China-WMHY5057419108.srt",
+            # "JoeRogan-2294":"JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt",
             "demo":"demo.srt",
         }
         
