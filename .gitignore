@@ -3,3 +3,4 @@ generated
 generated/*
 .idea/
 __pycache__
+/.venv/

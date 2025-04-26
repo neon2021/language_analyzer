@@ -28,42 +28,20 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from ebooklib import epub
+from datetime import datetime
+import sys
+import argparse
+
+from .utils import clean_text, get_stanza_model_path, check_model_exists, initialize_stanza
+from .constants import FONT_PATHS, REQUIRED_FILES
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)  # 降低日志级别
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
-
-# Initialize translator and other components
-translator = Translator()
-
-# Download required NLTK data
-try:
-    nltk.data.find('corpora/wordnet')
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('wordnet')
-    nltk.download('punkt')
-
-# 注册字体
-try:
-    # 尝试加载思源黑体
-    font_path = "/System/Library/Fonts/SourceHanSansTC-Regular.otf"  # macOS路径
-    if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"  # Linux路径
-    if not os.path.exists(font_path):
-        font_path = "C:/Windows/Fonts/SourceHanSansTC-Regular.otf"  # Windows路径
-    
-    if os.path.exists(font_path):
-        pdfmetrics.registerFont(TTFont('SourceHanSans', font_path))
-    else:
-        # 如果找不到思源黑体，尝试使用Arial Unicode MS（通用字体）
-        fallback_font = "/Library/Fonts/Arial Unicode.ttf"
-        if os.path.exists(fallback_font):
-            pdfmetrics.registerFont(TTFont('ArialUnicode', fallback_font))
-        else:
-            logging.warning("未找到合适的Unicode字体，PDF中的中文和音标可能无法正常显示")
-except Exception as e:
-    logging.error(f"注册字体时出错: {str(e)}")
 
 class LanguageAnalyzer:
     def __init__(self, srt_file: str, target_language: str = 'en', max_retries: int = 3, offline_mode: bool = False):
@@ -82,11 +60,11 @@ class LanguageAnalyzer:
         self.offline_mode = offline_mode
         
         # 创建generated目录
-        self.output_dir = Path("generated")
+        self.output_dir = Path("test-generated")
         self.output_dir.mkdir(exist_ok=True)
         
         # 初始化Stanza，添加重试机制
-        self.nlp = self._initialize_stanza(max_retries)
+        self.nlp = initialize_stanza(max_retries, offline_mode)
         
         # 初始化CEFR分类器
         self.cefr = CEFRAnalyzer()
@@ -101,76 +79,19 @@ class LanguageAnalyzer:
         self.difficult_words = set()
         self.difficult_phrases = set()
         self.difficult_sentences = set()
-        
-    def _get_stanza_model_path(self) -> Path:
-        """获取Stanza模型路径"""
-        home = Path.home()
-        model_path = home / 'stanza_resources'
-        if not model_path.exists():
-            model_path = Path('/usr/local/share/stanza_resources')
-        if not model_path.exists():
-            model_path = Path('/usr/share/stanza_resources')
-        return model_path / 'en'
-        
-    def _check_model_exists(self) -> bool:
-        """检查模型是否已下载"""
-        model_path = self._get_stanza_model_path()
-        if not model_path.exists():
-            return False
-            
-        # 检查必要的模型文件
-        required_files = [
-            'default.zip',
-            'tokenize/combined.pt',
-            'pos/combined_charlm.pt',
-            'lemma/combined_nocharlm.pt',
-            'depparse/combined_charlm.pt'
-        ]
-        
-        for file in required_files:
-            if not (model_path / file).exists():
-                logging.debug(f"缺少模型文件: {file}")
-                return False
-                
-        return True
-        
-    def _initialize_stanza(self, max_retries: int) -> stanza.Pipeline:
+
+    def _clean_text(self, text: str) -> str:
         """
-        初始化Stanza，包含重试机制
+        清理文本，移除HTML标签、特殊字符和多余空格
         
         Args:
-            max_retries: 最大重试次数
+            text: 要清理的文本
             
         Returns:
-            Stanza Pipeline对象
+            清理后的文本
         """
-        if self.offline_mode:
-            if not self._check_model_exists():
-                raise RuntimeError("离线模式下未找到Stanza模型，请先下载模型或禁用离线模式")
-            logging.info("使用离线模式初始化Stanza")
-            return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse', download_method=None)
-            
-        for attempt in range(max_retries):
-            try:
-                # 检查模型是否已下载
-                if not self._check_model_exists():
-                    logging.info("正在下载Stanza模型...")
-                    stanza.download('en', model_dir=str(self._get_stanza_model_path().parent))
-                
-                return stanza.Pipeline(lang='en', processors='tokenize,pos,lemma,depparse', download_method=DownloadMethod.REUSE_RESOURCES)
-                
-            except (ConnectionError, ConnectionResetError) as e:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 5  # 递增等待时间
-                    logging.warning(f"下载模型失败，{wait_time}秒后重试... (尝试 {attempt + 1}/{max_retries})")
-                    time.sleep(wait_time)
-                else:
-                    logging.error("无法下载Stanza模型，请检查网络连接或手动下载模型")
-                    raise
-            except Exception as e:
-                logging.error(f"初始化Stanza时发生错误: {e}")
-                raise
-                
+        return clean_text(text)
+
     def _load_subtitles(self) -> List[pysrt.SubRipItem]:
         """加载SRT字幕文件"""
         try:
@@ -178,18 +99,8 @@ class LanguageAnalyzer:
         except Exception as e:
             logger.error(f"加载字幕文件失败: {e}")
             raise
-            
-    def _clean_text(self, text: str) -> str:
-        """清理文本，移除特殊字符和多余空格"""
-        # 移除HTML标签
-        text = re.sub(r'<[^>]+>', '', text)
-        # 移除特殊字符，保留基本标点
-        text = re.sub(r'[^\w\s.,!?\'"-]', '', text)
-        # 规范化空格
-        text = ' '.join(text.split())
-        return text.strip()
-        
-    def analyze_subtitle(self, subtitle: pysrt.SubRipItem) -> Dict:
+
+    async def analyze_subtitle(self, subtitle: pysrt.SubRipItem) -> Dict:
         """
         分析单个字幕条目
         
@@ -201,10 +112,10 @@ class LanguageAnalyzer:
         """
         try:
             # 清理文本
-            clean_text = self._clean_text(subtitle.text)
+            cleaned_text = self._clean_text(subtitle.text)
             
             # 使用Stanza进行语言分析
-            doc = self.nlp(clean_text)
+            doc = self.nlp(cleaned_text)
             
             # 提取词性标注和依存关系
             pos_tags = []
@@ -223,15 +134,18 @@ class LanguageAnalyzer:
                     })
             
             # 翻译文本
-            translation = self.translator.translate(clean_text, dest=self.target_language)
+            translation = await self.translator.translate(cleaned_text, dest=self.target_language)
             
             return {
-                'original_text': clean_text,
+                'original_text': subtitle.text,
+                'cleaned_text': cleaned_text,
                 'translation': translation.text,
                 'pos_tags': pos_tags,
                 'dependencies': dependencies,
                 'start_time': str(subtitle.start),
-                'end_time': str(subtitle.end)
+                'end_time': str(subtitle.end),
+                'word_count': len(cleaned_text.split()),
+                'sentence_count': len(doc.sentences)
             }
             
         except Exception as e:
@@ -240,65 +154,6 @@ class LanguageAnalyzer:
                 'original_text': subtitle.text,
                 'error': str(e)
             }
-            
-    def analyze_all(self) -> List[Dict]:
-        """
-        分析所有字幕
-        
-        Returns:
-            包含所有字幕分析结果的列表
-        """
-        results = []
-        for subtitle in self.subtitles:
-            result = self.analyze_subtitle(subtitle)
-            results.append(result)
-        return results
-        
-    def generate_audio(self, text: str, output_file: str) -> None:
-        """
-        生成音频文件
-        
-        Args:
-            text: 要转换为音频的文本
-            output_file: 输出音频文件路径
-        """
-        try:
-            tts = gTTS(text=text, lang=self.target_language)
-            tts.save(output_file)
-            logger.info(f"音频文件已生成: {output_file}")
-        except Exception as e:
-            logger.error(f"生成音频失败: {e}")
-            raise
-            
-    def find_similar_phrases(self, phrase: str, threshold: float = 0.8) -> List[Dict]:
-        """
-        查找相似短语
-        
-        Args:
-            phrase: 要查找的短语
-            threshold: 相似度阈值
-            
-        Returns:
-            包含相似短语及其信息的列表
-        """
-        results = []
-        phrase = phrase.lower()
-        
-        for subtitle in self.subtitles:
-            text = subtitle.text.lower()
-            # 计算编辑距离
-            dist = distance(phrase, text)
-            similarity = 1 - (dist / max(len(phrase), len(text)))
-            
-            if similarity >= threshold:
-                results.append({
-                    'text': subtitle.text,
-                    'similarity': similarity,
-                    'start_time': str(subtitle.start),
-                    'end_time': str(subtitle.end)
-                })
-                
-        return sorted(results, key=lambda x: x['similarity'], reverse=True)
 
     def _merge_sentences(self) -> List[Dict]:
         """
@@ -360,7 +215,7 @@ class LanguageAnalyzer:
             })
             
         return merged_sentences
-        
+
     def _extract_phrases(self, text: str) -> List[str]:
         """
         从文本中提取有意义的短语
@@ -434,7 +289,7 @@ class LanguageAnalyzer:
         except Exception as e:
             logger.error(f"提取短语失败: {e}")
             return []
-            
+
     def _is_valid_phrase(self, phrase: str) -> bool:
         """
         判断短语是否合理
@@ -459,7 +314,7 @@ class LanguageAnalyzer:
         ]
         
         return not any(re.search(pattern, phrase.lower()) for pattern in invalid_patterns)
-        
+
     def _get_word_level(self, word: str) -> str:
         """使用cefrpy库确定单词的CEFR等级"""
         try:
@@ -757,7 +612,7 @@ class LanguageAnalyzer:
             logging.error(f"转换EPUB时出错: {str(e)}")
             return None
 
-    def _write_results(self, file_prefix: str, difficult_words: set, difficult_phrases: list, difficult_sentences: list):
+    async def _write_results(self, file_prefix: str, difficult_words: set, difficult_phrases: list, difficult_sentences: list):
         """
         将分析结果写入文件
         """
@@ -766,7 +621,7 @@ class LanguageAnalyzer:
             output_path = self.output_dir / f"{file_prefix}_words.txt"
             with open(output_path, "w", encoding="utf-8") as f:
                 for i, word in enumerate(sorted(difficult_words)):
-                    word_info = asyncio.run(self.get_word_info(word[0]))
+                    word_info = await self.get_word_info(word[0])
                     level = self._get_word_level(word[0])
                     
                     # 写入单词信息
@@ -822,15 +677,25 @@ class LanguageAnalyzer:
         difficult_word_count = sum(1 for word in words if self._is_difficult_word(word))
         return difficult_word_count >= len(words) / 2
 
-    def analyze_difficulty(self, file_prefix):
+    async def analyze_difficulty(self, file_prefix):
         """分析文本难度并写入结果"""
         try:
+            start_time = time.time()
+            logging.info(f"开始分析文件: {file_prefix}")
+            
             # 获取所有单词和短语
+            logging.info("开始合并句子...")
+            merge_start = time.time()
             self.merged_sentences = self._merge_sentences()
-            logging.info(f"合并后的句子数量: {len(self.merged_sentences)}")
+            merge_time = time.time() - merge_start
+            logging.info(f"合并后的句子数量: {len(self.merged_sentences)} (耗时: {merge_time:.2f}秒)")
             
             # 处理每个句子
-            for sentence in self.merged_sentences:
+            logging.info("开始处理句子...")
+            process_start = time.time()
+            for i, sentence in enumerate(self.merged_sentences):
+                if i % 100 == 0:  # 每处理100个句子输出一次进度
+                    logging.info(f"已处理 {i}/{len(self.merged_sentences)} 个句子")
                 text = sentence['text']
                 # 提取单词
                 words = text.lower().split()
@@ -840,26 +705,40 @@ class LanguageAnalyzer:
                 phrases = self._extract_phrases(text)
                 self.phrases.update(phrases)
             
+            process_time = time.time() - process_start
             logging.info(f"提取到的单词数量: {len(self.words)}")
             logging.info(f"提取到的短语数量: {len(self.phrases)}")
+            logging.info(f"句子处理完成 (耗时: {process_time:.2f}秒)")
 
             # 分析单词难度
+            logging.info("开始分析单词难度...")
+            word_start = time.time()
             difficult_words = []
-            for word in self.words:
+            for i, word in enumerate(self.words):
+                if i % 100 == 0:  # 每处理100个单词输出一次进度
+                    logging.info(f"已分析 {i}/{len(self.words)} 个单词")
                 if self._is_difficult_word(word):
-                    word_info = asyncio.run(self.get_word_info(word))
+                    word_info = await self.get_word_info(word)
                     difficult_words.append((word, word_info))
                     logging.debug(f"找到难词: {word}")
 
-            logging.info(f"找到的难词数量: {len(difficult_words)}")
+            word_time = time.time() - word_start
+            logging.info(f"找到的难词数量: {len(difficult_words)} (耗时: {word_time:.2f}秒)")
 
             # 分析短语难度
+            logging.info("开始分析短语难度...")
+            phrase_start = time.time()
             difficult_phrases = [phrase for phrase in self.phrases if self._is_difficult_phrase(phrase)]
-            logging.info(f"找到的难词组数量: {len(difficult_phrases)}")
+            phrase_time = time.time() - phrase_start
+            logging.info(f"找到的难词组数量: {len(difficult_phrases)} (耗时: {phrase_time:.2f}秒)")
 
             # 分析句子难度
+            logging.info("开始分析句子难度...")
+            sentence_start = time.time()
             difficult_sentences = []
-            for sentence in self.merged_sentences:
+            for i, sentence in enumerate(self.merged_sentences):
+                if i % 100 == 0:  # 每处理100个句子输出一次进度
+                    logging.info(f"已分析 {i}/{len(self.merged_sentences)} 个句子")
                 text = sentence['text']
                 words = text.split()
                 difficult_word_count = sum(1 for word in words if self._is_difficult_word(word))
@@ -867,33 +746,65 @@ class LanguageAnalyzer:
                     difficult_sentences.append(text)
                     logging.debug(f"找到难句: {text}")
 
-            logging.info(f"找到的难句数量: {len(difficult_sentences)}")
+            sentence_time = time.time() - sentence_start
+            logging.info(f"找到的难句数量: {len(difficult_sentences)} (耗时: {sentence_time:.2f}秒)")
 
             # 写入结果
-            self._write_results(file_prefix, difficult_words, difficult_phrases, difficult_sentences)
-            logging.info(f"分析完成，结果已写入文件")
+            logging.info("开始写入结果...")
+            write_start = time.time()
+            await self._write_results(file_prefix, difficult_words, difficult_phrases, difficult_sentences)
+            write_time = time.time() - write_start
+            logging.info(f"分析结果已写入文件并转换为PDF和EPUB格式 (耗时: {write_time:.2f}秒)")
+
+            total_time = time.time() - start_time
+            logging.info(f"分析完成，总耗时: {total_time:.2f}秒")
+            logging.info("各阶段耗时统计:")
+            logging.info(f"- 合并句子: {merge_time:.2f}秒 ({merge_time/total_time*100:.1f}%)")
+            logging.info(f"- 处理句子: {process_time:.2f}秒 ({process_time/total_time*100:.1f}%)")
+            logging.info(f"- 分析单词: {word_time:.2f}秒 ({word_time/total_time*100:.1f}%)")
+            logging.info(f"- 分析短语: {phrase_time:.2f}秒 ({phrase_time/total_time*100:.1f}%)")
+            logging.info(f"- 分析句子: {sentence_time:.2f}秒 ({sentence_time/total_time*100:.1f}%)")
+            logging.info(f"- 写入结果: {write_time:.2f}秒 ({write_time/total_time*100:.1f}%)")
 
         except Exception as e:
             logging.error(f"分析难度时出错: {str(e)}")
+            logging.error(traceback.format_exc())
             raise
 
 def main():
     try:
-        # 示例用法
-        # srt_file = "demo.srt"
-        srt_file_dict = {
-            # "CNN This Morning-20250408":"CNN This Morning-20250408-Trump Threatens China-WMHY5057419108.srt",
-            # "JoeRogan-2294":"JoeRogan-2294-GLT1061251245-2294 - Dr. Suzanne Humphries.srt",
-            "demo":"demo.srt",
-        }
+        import sys
+        import argparse
         
-        for file_prefix, srt_file in srt_file_dict.items():
-            # 检查是否使用离线模式
-            offline_mode = os.environ.get('STANZA_OFFLINE', 'false').lower() == 'true'
-            analyzer = LanguageAnalyzer(srt_file, offline_mode=offline_mode)
-            
-            # 分析难度
-            analyzer.analyze_difficulty(file_prefix)
+        # 设置命令行参数
+        parser = argparse.ArgumentParser(description='分析SRT字幕文件的难度')
+        parser.add_argument('srt_files', type=str, nargs='+', help='一个或多个SRT字幕文件路径')
+        args = parser.parse_args()
+        
+        # 检查是否使用离线模式
+        offline_mode = os.environ.get('STANZA_OFFLINE', 'false').lower() == 'true'
+        
+        # 处理每个文件
+        for srt_file in args.srt_files:
+            try:
+                # 获取文件路径并处理
+                srt_file = os.path.expanduser(srt_file)
+                if not os.path.exists(srt_file):
+                    logger.error(f"文件不存在: {srt_file}")
+                    continue
+                    
+                # 获取文件名（不含扩展名）作为前缀
+                file_prefix = os.path.splitext(os.path.basename(srt_file))[0]
+                
+                logger.info(f"开始处理文件: {srt_file}")
+                analyzer = LanguageAnalyzer(srt_file, offline_mode=offline_mode)
+                analyzer.analyze_difficulty(file_prefix)
+                logger.info(f"文件处理完成: {srt_file}")
+                
+            except Exception as e:
+                logger.error(f"处理文件 {srt_file} 时出错: {e}")
+                logger.error(traceback.format_exc())
+                continue
         
     except Exception as e:
         logger.error(f"程序运行出错: {e}")
